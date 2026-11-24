@@ -22,6 +22,7 @@ from analytics_engine import (
     get_dataset_metadata,
     automated_executive_summary
 )
+from audio_transcriber import transcribe_user_speech
 
 # Page configuration
 st.set_page_config(
@@ -214,6 +215,24 @@ tab_chat, tab_eda, tab_security = st.tabs([
 # ==========================================
 with tab_chat:
     st.markdown("#### Ask Any Analytical or Business Question")
+
+    # Audio Voice Input via Whisper
+    with st.expander("🎙️ Speak Your Question (Whisper Voice Input)", expanded=False):
+        st.caption("Click the microphone below, speak your question (e.g. *'What are the top 5 subcategories by profit?'*), and click stop.")
+        audio_clip = st.audio_input("Record audio question:")
+        if audio_clip is not None:
+            audio_bytes = audio_clip.read()
+            audio_hash = len(audio_bytes)
+            if st.session_state.get("last_audio_hash") != audio_hash:
+                st.session_state["last_audio_hash"] = audio_hash
+                with st.spinner("Transcribing speech with Whisper / Speech-to-Text..."):
+                    ok, speech_text = transcribe_user_speech(audio_bytes, api_key=api_key)
+                    if ok and speech_text.strip():
+                        st.session_state["query_box_input"] = speech_text
+                        st.session_state["run_now"] = True
+                        st.rerun()
+                    else:
+                        st.warning(f"Voice Notice: {speech_text}")
     
     col_input, col_btn = st.columns([5, 1])
     user_query = col_input.text_input(
