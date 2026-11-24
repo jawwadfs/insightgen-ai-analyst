@@ -186,11 +186,10 @@ if df is None:
 
 
 # Tabs
-tab_chat, tab_eda, tab_security, tab_jury = st.tabs([
+tab_chat, tab_eda, tab_security = st.tabs([
     "💬 Conversational Analyst",
     "📊 Automated EDA & Data Health",
-    "🛡️ AST Safety Sandbox Demo",
-    "🎓 Jury Defense & Rubric"
+    "🛡️ AST Safety Sandbox"
 ])
 
 
@@ -326,10 +325,9 @@ with tab_eda:
 # TAB 3: AST Safety Sandbox Live Demo
 # ==========================================
 with tab_security:
-    st.markdown("#### 🛡️ AST-Based Security Sandbox Proof of Concept")
+    st.markdown("#### 🛡️ AST-Based Security Sandbox")
     st.markdown("""
-    The jury explicitly asks: ***"How do you stop wrong/unsafe queries?"***
-    InsightGen solves this using an **Abstract Syntax Tree (AST) static analysis visitor** combined with a **restricted Python scope**.
+    InsightGen enforces memory safety and code isolation using an **Abstract Syntax Tree (AST) static analysis visitor** combined with a restricted execution scope.
     """)
 
     st.markdown("##### Test Malicious Code Injection against the Sandbox:")
@@ -350,40 +348,3 @@ with tab_security:
             st.error(f"🚨 **EXECUTION BLOCKED BY AST FIREWALL!**\n\n**Reason:** `{error_msg}`")
         else:
             st.success("Code is compliant with AST safety rules.")
-
-
-# ==========================================
-# TAB 4: Jury Defense & Rubric
-# ==========================================
-with tab_jury:
-    st.markdown("#### 🎓 Final Year Jury 2 Defense & Rubric Alignment")
-    
-    st.markdown("### 1. Mandatory Syllabus Questions")
-    with st.expander("❓ Question 1: How do you stop wrong/unsafe queries?", expanded=True):
-        st.markdown("""
-        **Our Technical Defense:**
-        1. **Static AST Analysis (Abstract Syntax Tree):** Before `exec()` is ever called, the code is parsed into a Python AST. A custom `CodeSafetyVisitor` walks every node to detect and block forbidden modules (`os`, `sys`, `subprocess`), dangerous builtins (`eval`, `open`, `compile`), and dunder traversal (`__class__`, `__subclasses__`).
-        2. **Restricted Execution Scope:** The code is executed in an isolated dictionary scope with a sanitized `__builtins__` whitelist, stripping away file and network I/O.
-        3. **Read-Only Data Isolation:** Queries operate on an isolated shallow copy of the DataFrame, preventing in-place mutations or data corruption.
-        4. **Self-Healing Loop:** If a query fails with a runtime Pandas error (e.g. casing mismatch), the error message is fed back into the model context to auto-correct syntax.
-        """)
-
-    with st.expander("❓ Question 2: Where does natural language translation fail?", expanded=True):
-        st.markdown("""
-        **Our Technical Defense:**
-        1. **Lexical Ambiguity & Polysemy:** When a user asks for *"highest grossing"*, without explicit domain mapping, the model may confuse `Sales` with `Profit` or `MonthlyIncome`.
-        2. **Implicit Multi-Step Business Logic:** Queries like *"Who are our most loyal customers?"* require defining loyalty (e.g. Tenure > 24 vs Order Count > 10). Without explicit threshold definitions, assumptions vary.
-        3. **Out-of-Vocabulary References:** Typographical errors or abbreviations in category names (e.g. *"Tech"* instead of *"Technology"*).
-        4. **Mitigation Strategy:** We inject rich schema metadata (column dtypes, exact unique category samples, statistical ranges) into the system prompt to anchor the translation.
-        """)
-
-    st.markdown("### 2. Group of 4 Member Responsibilities")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.info("**Student 1: Data Architect**\n- Dataset curation & schema profiling\n- Missing value & outlier handling\n- Five-number statistics")
-    with c2:
-        st.info("**Student 2: LLM Engineer**\n- System prompt engineering\n- Few-shot schema context injection\n- Self-healing retry pipeline")
-    with c3:
-        st.info("**Student 3: Security & Sandbox**\n- AST Visitor static analysis\n- Prohibited AST node blocking\n- Execution scope isolation")
-    with c4:
-        st.info("**Student 4: BI & Visuals**\n- Dynamic Plotly chart generation\n- Executive takeaway summaries\n- Streamlit UI & responsiveness")
