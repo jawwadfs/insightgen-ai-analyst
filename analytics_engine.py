@@ -106,10 +106,7 @@ def run_llm_query(
     api_key: Optional[str] = None,
     model_name: str = "gemini-1.5-flash"
 ) -> Dict[str, Any]:
-    """Generates and executes code using an LLM (Gemini API) with self-healing retry."""
-    metadata = get_dataset_metadata(df)
-    schema_text = format_schema_for_prompt(metadata)
-
+    """Generates and executes code using an LLM (Gemini API) with model failover and self-healing retry."""
     if not api_key:
         return {
             "success": False,
@@ -117,13 +114,30 @@ def run_llm_query(
             "mode": "llm_missing_key"
         }
 
+    # Clean and sanitize API key
+    clean_key = str(api_key).strip().strip('"').strip("'")
+    if len(clean_key) < 10:
+        return {
+            "success": False,
+            "error": "Invalid API Key format (too short).",
+            "mode": "llm_invalid_key"
+        }
+
+    metadata = get_dataset_metadata(df)
+    schema_text = format_schema_for_prompt(metadata)
+
     try:
         import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=SYSTEM_PROMPT
-        )
+        genai.configure(api_key=clean_key)
+        
+        # Try candidate models in order of speed and stability
+        candidate_models = [model_name, "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-pro"]
+        # Remove duplicates while preserving order
+        seen = set()
+        models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
+
+        model = None
+        last_gen_err = None
         
         prompt = f"""DATASET SCHEMA:
 {schema_text}
@@ -133,14 +147,38 @@ USER QUESTION:
 
 Generate the Python code to compute `result`, optional `fig`, and `summary`.
 """
-        response = model.generate_content(prompt)
+
+        response = None
+        used_model_name = ""
+        for m_name in models_to_try:
+            try:
+                curr_model = genai.GenerativeModel(
+                    model_name=m_name,
+                    system_instruction=SYSTEM_PROMPT
+                )
+                response = curr_model.generate_content(prompt)
+                if response and response.text:
+                    model = curr_model
+                    used_model_name = m_name
+                    break
+            except Exception as e_model:
+                last_gen_err = str(e_model)
+                continue
+
+        if not response or not response.text:
+            return {
+                "success": False,
+                "error": f"LLM Generation Error across models: {last_gen_err}",
+                "mode": "llm_failed"
+            }
+
         raw_code = extract_python_code(response.text)
 
         # First execution attempt
         exec_res = execute_sandboxed_code(raw_code, df, pd, np, px, go)
         
         # Self-healing retry if runtime error occurred
-        if not exec_res["success"] and "Runtime Execution Error" in exec_res["error"]:
+        if not exec_res["success"] and "Runtime Execution Error" in str(exec_res.get("error")):
             heal_prompt = f"""The previous code encountered an error:
 {exec_res['error']}
 
@@ -154,14 +192,19 @@ DATASET SCHEMA:
 
 Please fix the error (e.g. check column name casing, data types, or aggregation methods) and return corrected Python code only.
 """
-            heal_response = model.generate_content(heal_prompt)
-            healed_code = extract_python_code(heal_response.text)
-            healed_res = execute_sandboxed_code(healed_code, df, pd, np, px, go)
-            healed_res["self_healed"] = True
-            healed_res["original_code"] = raw_code
-            return healed_res
+            try:
+                heal_response = model.generate_content(heal_prompt)
+                healed_code = extract_python_code(heal_response.text)
+                healed_res = execute_sandboxed_code(healed_code, df, pd, np, px, go)
+                healed_res["self_healed"] = True
+                healed_res["original_code"] = raw_code
+                healed_res["model_used"] = used_model_name
+                return healed_res
+            except Exception:
+                pass
 
         exec_res["self_healed"] = False
+        exec_res["model_used"] = used_model_name
         return exec_res
 
     except Exception as e:

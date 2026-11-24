@@ -217,10 +217,11 @@ with tab_chat:
                 start_time = time.time()
                 
                 # Check execution mode
-                if api_key:
+                fallback_reason = None
+                if api_key and len(api_key.strip()) > 10:
                     exec_result = run_llm_query(user_query, df, api_key=api_key)
                     if not exec_result["success"] and "LLM" in str(exec_result.get("error")):
-                        st.info("Falling back to local heuristic engine due to API timeout/quota.")
+                        fallback_reason = exec_result.get("error")
                         exec_result = fallback_offline_query(user_query, df)
                 else:
                     exec_result = fallback_offline_query(user_query, df)
@@ -230,6 +231,12 @@ with tab_chat:
             # Display Results
             if exec_result["success"]:
                 st.success(f"Query executed safely in **{latency}s** | Security Verification: **PASSED**")
+                
+                # If fallback was used due to API issue, show friendly notification
+                if fallback_reason:
+                    with st.expander("ℹ️ Note on API Connection (Used Offline Fallback Engine)"):
+                        st.caption(f"**Gemini Notice:** {fallback_reason}")
+                        st.caption("The query was automatically processed using the local semantic heuristic engine to prevent failure.")
                 
                 # 1. Business Insight / Summary
                 if exec_result.get("summary"):
