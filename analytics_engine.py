@@ -130,11 +130,48 @@ def run_llm_query(
         import google.generativeai as genai
         genai.configure(api_key=clean_key)
         
-        # Try candidate models in order of speed and stability
-        candidate_models = [model_name, "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-pro"]
-        # Remove duplicates while preserving order
-        seen = set()
-        models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
+        # Discover available models dynamically for this specific API key
+        active_models = []
+        try:
+            for m in genai.list_models():
+                if "generateContent" in getattr(m, "supported_generation_methods", []):
+                    # m.name is usually "models/gemini-1.5-flash"
+                    active_models.append(m.name)
+        except Exception as auth_err:
+            err_msg = str(auth_err)
+            if "API_KEY_INVALID" in err_msg or "400" in err_msg:
+                return {
+                    "success": False,
+                    "error": "Authentication Failed: Gemini API Key is invalid or expired. Check Streamlit Secrets.",
+                    "mode": "llm_auth_error"
+                }
+            elif "PERMISSION_DENIED" in err_msg or "403" in err_msg:
+                return {
+                    "success": False,
+                    "error": "Access Denied: Gemini API Key does not have permissions for Generative Language API.",
+                    "mode": "llm_perm_error"
+                }
+
+        # Build prioritized list of models to try
+        preferred_order = [
+            "models/gemini-1.5-flash", "gemini-1.5-flash",
+            "models/gemini-2.0-flash", "gemini-2.0-flash",
+            "models/gemini-1.5-flash-8b", "gemini-1.5-flash-8b",
+            "models/gemini-1.5-pro", "gemini-1.5-pro"
+        ]
+        
+        models_to_try = []
+        if active_models:
+            for pref in preferred_order:
+                if pref in active_models:
+                    models_to_try.append(pref)
+            # Add any other active models
+            for am in active_models:
+                if "gemini" in am.lower() and am not in models_to_try:
+                    models_to_try.append(am)
+        
+        if not models_to_try:
+            models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
 
         model = None
         last_gen_err = None
@@ -168,7 +205,7 @@ Generate the Python code to compute `result`, optional `fig`, and `summary`.
         if not response or not response.text:
             return {
                 "success": False,
-                "error": f"LLM Generation Error across models: {last_gen_err}",
+                "error": f"LLM Generation Error: {last_gen_err}",
                 "mode": "llm_failed"
             }
 
