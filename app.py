@@ -151,24 +151,40 @@ if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets and st.secrets["GEM
 elif os.getenv("GEMINI_API_KEY"):
     api_key = str(os.getenv("GEMINI_API_KEY")).strip()
 
-# Engine Status
+# Engine Status & Mode Selection
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 2. Execution Engine")
+
+mode_choice = st.sidebar.radio(
+    "Engine Mode:",
+    ["⚡ Smart Auto (Fastest)", "💻 100% Offline Local (Instant)"],
+    index=0
+)
+
 if api_key:
-    st.sidebar.success("⚡ **Gemini 1.5 Flash (Live)**\n\n*Authenticated via Streamlit Secrets*")
+    st.sidebar.success("⚡ **Gemini 1.5 Flash (Live)**\n\n*Authenticated via Secrets*")
 else:
-    st.sidebar.info("⚡ **Smart Offline Heuristic Engine**\n\n*(Zero-API mode active)*")
+    st.sidebar.info("⚡ **Offline Engine Active**\n\n*(Zero-API mode)*")
     with st.sidebar.expander("⚙️ Local Key (Optional)"):
         manual_key = st.text_input("Manual Key:", type="password", help="On Streamlit Cloud, add GEMINI_API_KEY to App Settings -> Secrets.")
         if manual_key:
             api_key = manual_key.strip()
 
+# Initialize session state for query input
+if "query_box_input" not in st.session_state:
+    st.session_state["query_box_input"] = sample_questions[0] if sample_questions else ""
+if "run_now" not in st.session_state:
+    st.session_state["run_now"] = False
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 3. Suggested Questions")
-selected_sample = None
+
+def select_sample_query(q_text):
+    st.session_state["query_box_input"] = q_text
+    st.session_state["run_now"] = True
+
 for sq in sample_questions:
-    if st.sidebar.button(f"👉 {sq}", key=f"sq_{sq}"):
-        selected_sample = sq
+    st.sidebar.button(f"👉 {sq}", key=f"sq_{sq}", on_click=select_sample_query, args=(sq,))
 
 
 # Main Dashboard Header
@@ -200,30 +216,33 @@ with tab_chat:
     st.markdown("#### Ask Any Analytical or Business Question")
     
     col_input, col_btn = st.columns([5, 1])
-    default_text = selected_sample if selected_sample else ""
     user_query = col_input.text_input(
         "Enter your query in plain English:",
-        value=default_text,
+        key="query_box_input",
         placeholder="e.g. What are the top 5 subcategories by profit?"
     )
     submit_btn = col_btn.button("Run Query 🚀", use_container_width=True)
 
-    if submit_btn or selected_sample:
-        if not user_query.strip():
+    should_run = submit_btn or st.session_state.get("run_now", False)
+    st.session_state["run_now"] = False
+
+    active_query = user_query.strip()
+    if should_run:
+        if not active_query:
             st.warning("Please type a question or select a sample question.")
         else:
-            with st.spinner("Analyzing data and generating validated execution pipeline..."):
+            with st.spinner("Analyzing data and generating execution pipeline..."):
                 start_time = time.time()
                 
                 # Check execution mode
                 fallback_reason = None
-                if api_key and len(api_key.strip()) > 10:
-                    exec_result = run_llm_query(user_query, df, api_key=api_key)
-                    if not exec_result["success"] and "LLM" in str(exec_result.get("error")):
+                if mode_choice == "⚡ Smart Auto (Fastest)" and api_key and len(api_key.strip()) > 10:
+                    exec_result = run_llm_query(active_query, df, api_key=api_key)
+                    if not exec_result["success"]:
                         fallback_reason = exec_result.get("error")
-                        exec_result = fallback_offline_query(user_query, df)
+                        exec_result = fallback_offline_query(active_query, df)
                 else:
-                    exec_result = fallback_offline_query(user_query, df)
+                    exec_result = fallback_offline_query(active_query, df)
 
                 latency = round(time.time() - start_time, 3)
 
@@ -233,9 +252,9 @@ with tab_chat:
                 
                 # If fallback was used due to API issue, show friendly notification
                 if fallback_reason:
-                    with st.expander("ℹ️ Note on API Connection (Used Offline Fallback Engine)"):
-                        st.caption(f"**Gemini Notice:** {fallback_reason}")
-                        st.caption("The query was automatically processed using the local semantic heuristic engine to prevent failure.")
+                    with st.expander("ℹ️ Connection Notice (Switched to Fast Local Engine)"):
+                        st.caption(f"**Notice:** {fallback_reason}")
+                        st.caption("Processed seamlessly using the local heuristic analytics engine.")
                 
                 # 1. Business Insight / Summary
                 if exec_result.get("summary"):

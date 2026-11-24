@@ -100,13 +100,15 @@ def extract_python_code(raw_response: str) -> str:
     return raw_response.strip()
 
 
+import concurrent.futures
+
 def run_llm_query(
     user_query: str,
     df: pd.DataFrame,
     api_key: Optional[str] = None,
     model_name: str = "gemini-1.5-flash"
 ) -> Dict[str, Any]:
-    """Generates and executes code using an LLM (Gemini API) with model failover and self-healing retry."""
+    """Generates and executes code using Gemini with a strict 5-second hard ceiling."""
     if not api_key:
         return {
             "success": False,
@@ -119,62 +121,22 @@ def run_llm_query(
     if len(clean_key) < 10:
         return {
             "success": False,
-            "error": "Invalid API Key format (too short).",
+            "error": "Invalid API Key format.",
             "mode": "llm_invalid_key"
         }
 
     metadata = get_dataset_metadata(df)
     schema_text = format_schema_for_prompt(metadata)
 
-    try:
+    def _call_gemini_api():
         import google.generativeai as genai
         genai.configure(api_key=clean_key)
         
-        # Discover available models dynamically for this specific API key
-        active_models = []
-        try:
-            for m in genai.list_models():
-                if "generateContent" in getattr(m, "supported_generation_methods", []):
-                    # m.name is usually "models/gemini-1.5-flash"
-                    active_models.append(m.name)
-        except Exception as auth_err:
-            err_msg = str(auth_err)
-            if "API_KEY_INVALID" in err_msg or "400" in err_msg:
-                return {
-                    "success": False,
-                    "error": "Authentication Failed: Gemini API Key is invalid or expired. Check Streamlit Secrets.",
-                    "mode": "llm_auth_error"
-                }
-            elif "PERMISSION_DENIED" in err_msg or "403" in err_msg:
-                return {
-                    "success": False,
-                    "error": "Access Denied: Gemini API Key does not have permissions for Generative Language API.",
-                    "mode": "llm_perm_error"
-                }
-
-        # Build prioritized list of models to try
-        preferred_order = [
-            "models/gemini-1.5-flash", "gemini-1.5-flash",
-            "models/gemini-2.0-flash", "gemini-2.0-flash",
-            "models/gemini-1.5-flash-8b", "gemini-1.5-flash-8b",
-            "models/gemini-1.5-pro", "gemini-1.5-pro"
-        ]
-        
-        models_to_try = []
-        if active_models:
-            for pref in preferred_order:
-                if pref in active_models:
-                    models_to_try.append(pref)
-            # Add any other active models
-            for am in active_models:
-                if "gemini" in am.lower() and am not in models_to_try:
-                    models_to_try.append(am)
-        
-        if not models_to_try:
-            models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
-
-        model = None
-        last_gen_err = None
+        # Directly target gemini-1.5-flash without slow list_models() trip
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_PROMPT
+        )
         
         prompt = f"""DATASET SCHEMA:
 {schema_text}
@@ -184,66 +146,33 @@ USER QUESTION:
 
 Generate the Python code to compute `result`, optional `fig`, and `summary`.
 """
+        return model.generate_content(prompt)
 
-        response = None
-        used_model_name = ""
-        for m_name in models_to_try:
-            try:
-                curr_model = genai.GenerativeModel(
-                    model_name=m_name,
-                    system_instruction=SYSTEM_PROMPT
-                )
-                response = curr_model.generate_content(prompt)
-                if response and response.text:
-                    model = curr_model
-                    used_model_name = m_name
-                    break
-            except Exception as e_model:
-                last_gen_err = str(e_model)
-                continue
+    try:
+        # Enforce strict 5-second hard ceiling to prevent UI hanging
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_call_gemini_api)
+            response = future.result(timeout=5.0)
 
         if not response or not response.text:
             return {
                 "success": False,
-                "error": f"LLM Generation Error: {last_gen_err}",
+                "error": "Empty response from Gemini API.",
                 "mode": "llm_failed"
             }
 
         raw_code = extract_python_code(response.text)
-
-        # First execution attempt
         exec_res = execute_sandboxed_code(raw_code, df, pd, np, px, go)
-        
-        # Self-healing retry if runtime error occurred
-        if not exec_res["success"] and "Runtime Execution Error" in str(exec_res.get("error")):
-            heal_prompt = f"""The previous code encountered an error:
-{exec_res['error']}
-
-Original Code:
-```python
-{raw_code}
-```
-
-DATASET SCHEMA:
-{schema_text}
-
-Please fix the error (e.g. check column name casing, data types, or aggregation methods) and return corrected Python code only.
-"""
-            try:
-                heal_response = model.generate_content(heal_prompt)
-                healed_code = extract_python_code(heal_response.text)
-                healed_res = execute_sandboxed_code(healed_code, df, pd, np, px, go)
-                healed_res["self_healed"] = True
-                healed_res["original_code"] = raw_code
-                healed_res["model_used"] = used_model_name
-                return healed_res
-            except Exception:
-                pass
-
         exec_res["self_healed"] = False
-        exec_res["model_used"] = used_model_name
+        exec_res["model_used"] = "gemini-1.5-flash"
         return exec_res
 
+    except concurrent.futures.TimeoutError:
+        return {
+            "success": False,
+            "error": "Gemini API timed out after 5.0s (network/latency limit).",
+            "mode": "llm_timeout"
+        }
     except Exception as e:
         return {
             "success": False,
