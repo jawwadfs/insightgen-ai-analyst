@@ -132,13 +132,22 @@ def run_llm_query(
         import google.generativeai as genai
         genai.configure(api_key=clean_key)
         
-        # Directly target gemini-1.5-flash without slow list_models() trip
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=SYSTEM_PROMPT
-        )
+        models_to_try = [
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-pro"
+        ]
         
-        prompt = f"""DATASET SCHEMA:
+        last_e = None
+        for m_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(
+                    model_name=m_name,
+                    system_instruction=SYSTEM_PROMPT
+                )
+                prompt = f"""DATASET SCHEMA:
 {schema_text}
 
 USER QUESTION:
@@ -146,13 +155,21 @@ USER QUESTION:
 
 Generate the Python code to compute `result`, optional `fig`, and `summary`.
 """
-        return model.generate_content(prompt)
+                resp = model.generate_content(prompt)
+                if resp and resp.text:
+                    return resp, m_name
+            except Exception as e_model:
+                last_e = e_model
+                continue
+        if last_e:
+            raise last_e
+        raise RuntimeError("No model succeeded.")
 
     try:
         # Enforce strict 5-second hard ceiling to prevent UI hanging
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_call_gemini_api)
-            response = future.result(timeout=5.0)
+            response, used_m_name = future.result(timeout=6.0)
 
         if not response or not response.text:
             return {
@@ -164,7 +181,7 @@ Generate the Python code to compute `result`, optional `fig`, and `summary`.
         raw_code = extract_python_code(response.text)
         exec_res = execute_sandboxed_code(raw_code, df, pd, np, px, go)
         exec_res["self_healed"] = False
-        exec_res["model_used"] = "gemini-1.5-flash"
+        exec_res["model_used"] = used_m_name
         return exec_res
 
     except concurrent.futures.TimeoutError:

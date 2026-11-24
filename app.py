@@ -84,12 +84,20 @@ st.sidebar.caption("PS 91: Natural-Language CSV Analytics Engine")
 st.sidebar.markdown("### 1. Ingest Dataset")
 dataset_source = st.sidebar.radio(
     "Choose Data Source:",
-    ["Sample: Retail Superstore", "Sample: Customer Churn", "Sample: HR Attrition", "Upload Custom CSV"]
+    [
+        "Sample: Global 100 Sales",
+        "Sample: Retail Superstore",
+        "Sample: Customer Churn",
+        "Sample: HR Attrition",
+        "Upload Custom CSV"
+    ]
 )
 
 @st.cache_data
 def load_sample_data(name: str):
-    if name == "superstore":
+    if name == "global100":
+        return pd.read_csv("datasets/global_sales_100.csv")
+    elif name == "superstore":
         return pd.read_csv("datasets/superstore_sales.csv")
     elif name == "churn":
         return pd.read_csv("datasets/customer_churn.csv")
@@ -98,7 +106,18 @@ def load_sample_data(name: str):
     return None
 
 df = None
-if dataset_source == "Sample: Retail Superstore":
+if dataset_source == "Sample: Global 100 Sales":
+    df = load_sample_data("global100")
+    dataset_name = "Global Sales 100 Records"
+    sample_questions = [
+        "What are the top 5 countries by Total Profit?",
+        "Show Total Revenue by Region",
+        "Compare Total Revenue across Sales Channels",
+        "What is the distribution of Units Sold?",
+        "Check correlation between Total Revenue and Total Profit",
+        "Detect outliers in Total Profit"
+    ]
+elif dataset_source == "Sample: Retail Superstore":
     df = load_sample_data("superstore")
     dataset_name = "Superstore Sales Analytics"
     sample_questions = [
