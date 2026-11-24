@@ -248,11 +248,15 @@ with tab_chat:
                     ok, speech_text = transcribe_user_speech(audio_bytes, api_key=api_key)
                     if ok and speech_text.strip():
                         st.session_state["query_box_input"] = speech_text
+                        st.session_state["voice_transcribed_pill"] = speech_text
                         st.session_state["run_now"] = True
                         st.rerun()
                     else:
                         st.warning(f"Voice Notice: {speech_text}")
     
+    if st.session_state.get("voice_transcribed_pill"):
+        st.info(f"🎙️ **Transcribed Voice Query:** \"{st.session_state['voice_transcribed_pill']}\"")
+
     col_input, col_btn = st.columns([5, 1])
     user_query = col_input.text_input(
         "Enter your query in plain English:",

@@ -210,11 +210,26 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
 
+    # Prioritize meaningful numeric business metrics over ID/index columns
+    id_tokens = ["id", "order_id", "order id", "customer_id", "employee_id", "code", "zip"]
+    meaningful_num_cols = [c for c in num_cols if not any(t == c.lower().strip() or t in c.lower() for t in id_tokens)]
+    if not meaningful_num_cols:
+        meaningful_num_cols = num_cols
+
+    # Prioritize categorical dimensions over IDs
+    meaningful_cat_cols = [c for c in cat_cols if not any(t == c.lower().strip() or t in c.lower() for t in id_tokens)]
+    if not meaningful_cat_cols:
+        meaningful_cat_cols = cat_cols
+
     generated_code = ""
 
     # Improved matching helper
     def find_best_column(raw_term, candidate_cols):
+        if not raw_term or not str(raw_term).strip():
+            return None
         raw_clean = raw_term.lower().replace(" ", "").replace("_", "")
+        if not raw_clean:
+            return None
         # exact or contains
         for col in candidate_cols:
             c_clean = col.lower().replace(" ", "").replace("_", "")
@@ -250,19 +265,33 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
 
     # 2. Top N / Ranking queries
     top_match = re.search(r"(?:top|highest|best)\s*(\d+)?\s*([a-zA-Z\s_]+?)\s*by\s*([a-zA-Z\s_]+)", q)
+    if not top_match:
+        # Match "top 5 countries" or "highest products" without explicit "by"
+        top_simple = re.search(r"(?:top|highest|best)\s*(\d+)?\s*([a-zA-Z\s_]+)", q)
+        if top_simple:
+            n_str = top_simple.group(1)
+            raw_dim = top_simple.group(2).strip()
+            # Verify raw_dim matches one of our categorical columns
+            if find_best_column(raw_dim, meaningful_cat_cols) or find_best_column(raw_dim, cat_cols):
+                top_match = top_simple
+                raw_metric = ""
+
     if top_match:
         n = int(top_match.group(1)) if top_match.group(1) else 5
         raw_dim = top_match.group(2).strip()
-        raw_metric = top_match.group(3).strip()
+        raw_metric = top_match.group(3).strip() if len(top_match.groups()) >= 3 and top_match.group(3) else ""
 
         matched_dim = find_best_column(raw_dim, cat_cols) or find_best_column(raw_dim, columns)
         matched_metric = find_best_column(raw_metric, num_cols) or find_best_column(raw_metric, columns)
 
-        if not matched_dim and cat_cols:
-            # exclude ID-like columns if possible
-            non_id_cats = [c for c in cat_cols if "id" not in c.lower()]
-            matched_dim = non_id_cats[0] if non_id_cats else cat_cols[0]
-        if not matched_metric and num_cols:
+        if not matched_dim and meaningful_cat_cols:
+            matched_dim = meaningful_cat_cols[0]
+        elif not matched_dim and cat_cols:
+            matched_dim = cat_cols[0]
+            
+        if not matched_metric and meaningful_num_cols:
+            matched_metric = meaningful_num_cols[-1]
+        elif not matched_metric and num_cols:
             matched_metric = num_cols[0]
 
         if matched_dim and matched_metric:
@@ -318,8 +347,8 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
 
     # 4. Distribution / Histogram
     if "distribution" in q or "histogram" in q or "spread" in q:
-        target_num = num_cols[0] if num_cols else columns[0]
-        for col in num_cols:
+        target_num = meaningful_num_cols[0] if meaningful_num_cols else (num_cols[0] if num_cols else columns[0])
+        for col in meaningful_num_cols + num_cols:
             if col.lower() in q:
                 target_num = col
                 break
@@ -333,9 +362,23 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
 
     # 5. Outliers / Boxplot
     if "outlier" in q or "anomaly" in q or "box" in q:
-        target_num = num_cols[0] if num_cols else columns[0]
-        for col in num_cols:
+        # Check if user mentioned profit, revenue, sales, etc.
+        target_num = meaningful_num_cols[-1] if meaningful_num_cols else (num_cols[0] if num_cols else columns[0])
+        for col in meaningful_num_cols + num_cols:
             if col.lower() in q:
+                target_num = col
+                break
+            # check common keywords
+            if "profit" in q and "profit" in col.lower():
+                target_num = col
+                break
+            if ("revenue" in q or "sales" in q) and ("revenue" in col.lower() or "sales" in col.lower()):
+                target_num = col
+                break
+            if "cost" in q and "cost" in col.lower():
+                target_num = col
+                break
+            if "unit" in q and "unit" in col.lower():
                 target_num = col
                 break
         code = (
