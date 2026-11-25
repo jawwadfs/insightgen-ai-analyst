@@ -88,7 +88,14 @@ RULES AND CONVENTIONS:
 3. Provide a brief 1-2 sentence business insight or executive takeaway in string variable `summary`.
 4. SECURITY: Never import `os`, `sys`, `subprocess`, `open`, or write files. Rely strictly on `df`.
 5. Ensure column names match EXACTLY with the schema provided.
-6. OUTPUT FORMAT: Output ONLY pure Python code. Do not include markdown conversational filler outside the code block.
+6. DOMAIN KNOWLEDGE & FINANCIAL METRICS:
+   - When a dataset has `margin` or `gross_margin`, treat it as Profit ($).
+   - If asked for "profit margin %" or "margin percentage", compute: (df['margin'] / df['revenue'] * 100).
+   - Treat `revenue` as sales / turnover ($), and `cost` as total expenditure / COGS ($).
+   - Never use ID, key, or code columns (e.g. `invoice_no`, `order_id`, `customer_id`, `product_id`) for financial aggregations, rankings, or distributions.
+   - For shipping turnaround / delivery delays when `order_date` and `ship_date` are present: (pd.to_datetime(df['ship_date']) - pd.to_datetime(df['order_date'])).dt.days.
+   - For time series trends, convert date columns using pd.to_datetime and sort chronologically.
+7. OUTPUT FORMAT: Output ONLY pure Python code. Do not include markdown conversational filler outside the code block.
 """
 
 
@@ -284,6 +291,133 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
                 if base in col.lower():
                     return col
         return None
+
+    # 0. Overall Financial KPIs / Summary
+    if any(k in q for k in ["total revenue", "total profit", "total sales", "total margin", "overall kpi", "kpi", "financial performance", "overview of sales"]):
+        rev_col = find_best_column("revenue", meaningful_num_cols) or find_best_column("sales", meaningful_num_cols)
+        margin_col = find_best_column("profit", meaningful_num_cols) or find_best_column("margin", meaningful_num_cols)
+        cost_col = find_best_column("cost", meaningful_num_cols)
+        
+        calc_lines = []
+        dict_items = []
+        chart_metrics = []
+        chart_amounts = []
+        if rev_col:
+            calc_lines.append(f"tot_rev = df['{rev_col}'].sum()")
+            dict_items.append(f"'Total Revenue ($)': f'${{tot_rev:,.2f}}'")
+            chart_metrics.append("'Revenue'")
+            chart_amounts.append("tot_rev")
+        if cost_col:
+            calc_lines.append(f"tot_cost = df['{cost_col}'].sum()")
+            dict_items.append(f"'Total Cost ($)': f'${{tot_cost:,.2f}}'")
+            chart_metrics.append("'Cost'")
+            chart_amounts.append("tot_cost")
+        if margin_col:
+            calc_lines.append(f"tot_margin = df['{margin_col}'].sum()")
+            dict_items.append(f"'Total Margin / Profit ($)': f'${{tot_margin:,.2f}}'")
+            chart_metrics.append("'Profit (Margin)'")
+            chart_amounts.append("tot_margin")
+        if rev_col and margin_col:
+            calc_lines.append(f"overall_margin_pct = (tot_margin / tot_rev * 100) if tot_rev > 0 else 0")
+            dict_items.append(f"'Profit Margin': f'{{overall_margin_pct:.2f}}%'")
+        dict_items.append(f"'Total Invoices / Records': f'{{len(df):,}}'")
+
+        calc_str = "\n".join(calc_lines)
+        dict_str = ", ".join(dict_items)
+        code = (
+            f"{calc_str}\n"
+            f"result = pd.DataFrame([{{{dict_str}}}])\n"
+            f"chart_data = pd.DataFrame({{\n"
+            f"    'Metric': [{', '.join(chart_metrics)}],\n"
+            f"    'Amount ($)': [{', '.join(chart_amounts)}]\n"
+            f"}})\n"
+            f"fig = px.bar(chart_data, x='Metric', y='Amount ($)', color='Metric', title='Financial Performance Overview ($)', template='plotly_white')\n"
+            f"summary = f'Generated overall financial performance: Revenue is ${{tot_rev:,.2f}} with ${{tot_margin:,.2f}} total profit.'"
+        )
+        return execute_sandboxed_code(code, df, pd, np, px, go)
+
+    # 0.1 Shipping / Delivery Turnaround Time
+    if any(k in q for k in ["ship", "delivery", "turnaround", "lead time"]) and any("date" in c.lower() for c in columns):
+        date_cols = [c for c in columns if "date" in c.lower()]
+        order_col = next((c for c in date_cols if "order" in c.lower()), date_cols[0] if date_cols else None)
+        ship_col = next((c for c in date_cols if "ship" in c.lower() or "deliver" in c.lower()), date_cols[-1] if len(date_cols) > 1 else None)
+        
+        if order_col and ship_col and order_col != ship_col:
+            dim_col = find_best_column("category", meaningful_cat_cols) or (meaningful_cat_cols[0] if meaningful_cat_cols else None)
+            code = (
+                f"df_temp = df.copy()\n"
+                f"df_temp['shipping_days'] = (pd.to_datetime(df_temp['{ship_col}']) - pd.to_datetime(df_temp['{order_col}'])).dt.days\n"
+                f"result = df_temp.groupby('{dim_col}')['shipping_days'].agg(['mean', 'median', 'max']).round(2).reset_index()\n"
+                f"result.columns = ['{dim_col}', 'Avg_Ship_Days', 'Median_Ship_Days', 'Max_Ship_Days']\n"
+                f"fig = px.bar(result, x='{dim_col}', y='Avg_Ship_Days', color='Avg_Ship_Days', "
+                f"title='Average Delivery Turnaround (Days) by {dim_col}', template='plotly_white')\n"
+                f"avg_days = df_temp['shipping_days'].mean()\n"
+                f"summary = f'Average delivery lead time is {{avg_days:.2f}} days across all shipments.'"
+            )
+            return execute_sandboxed_code(code, df, pd, np, px, go)
+
+    # 0.2 Margin Percentage / Profit Margin by Category/Segment
+    if any(k in q for k in ["margin %", "margin percent", "profit margin", "margin rate"]):
+        rev_col = find_best_column("revenue", meaningful_num_cols) or find_best_column("sales", meaningful_num_cols)
+        margin_col = find_best_column("margin", meaningful_num_cols) or find_best_column("profit", meaningful_num_cols)
+        dim_col = None
+        for c in meaningful_cat_cols:
+            if c.lower() in q:
+                dim_col = c
+                break
+        if not dim_col and meaningful_cat_cols:
+            dim_col = meaningful_cat_cols[0]
+
+        if rev_col and margin_col and dim_col:
+            code = (
+                f"agg = df.groupby('{dim_col}').agg({{'{margin_col}': 'sum', '{rev_col}': 'sum'}}).reset_index()\n"
+                f"agg['Margin_Pct'] = ((agg['{margin_col}'] / agg['{rev_col}']) * 100).round(2)\n"
+                f"result = agg.sort_values(by='Margin_Pct', ascending=False)\n"
+                f"fig = px.bar(result, x='{dim_col}', y='Margin_Pct', color='Margin_Pct', "
+                f"title='Profit Margin % by {dim_col}', template='plotly_white')\n"
+                f"leader = result.iloc[0]['{dim_col}']\n"
+                f"highest_pct = result.iloc[0]['Margin_Pct']\n"
+                f"summary = f'Top margin driver is {{leader}} achieving {{highest_pct:.1f}}% profit margin.'\n"
+            )
+            return execute_sandboxed_code(code, df, pd, np, px, go)
+
+    # 0.3 Time Series / Sales Trend
+    if any(k in q for k in ["trend", "over time", "by date", "daily", "monthly", "timeline"]):
+        date_cols = [c for c in columns if "date" in c.lower()]
+        target_date = next((c for c in date_cols if "order" in c.lower()), date_cols[0] if date_cols else None)
+        target_metric = find_best_column("revenue", meaningful_num_cols) or find_best_column("profit", meaningful_num_cols) or meaningful_num_cols[0]
+        
+        if target_date and target_metric:
+            code = (
+                f"df_temp = df.copy()\n"
+                f"df_temp['{target_date}'] = pd.to_datetime(df_temp['{target_date}'])\n"
+                f"daily = df_temp.groupby(df_temp['{target_date}'].dt.date)['{target_metric}'].sum().reset_index()\n"
+                f"daily.columns = ['Date', 'Total_{target_metric}']\n"
+                f"result = daily.sort_values(by='Date')\n"
+                f"fig = px.line(result, x='Date', y='Total_{target_metric}', markers=True, "
+                f"title='{target_metric} Trend Over Time', template='plotly_white')\n"
+                f"peak_date = result.sort_values(by='Total_{target_metric}', ascending=False).iloc[0]['Date']\n"
+                f"peak_val = result.sort_values(by='Total_{target_metric}', ascending=False).iloc[0]['Total_{target_metric}']\n"
+                f"summary = f'Peak {target_metric} occurred on {{peak_date}} reaching ${{peak_val:,.2f}}.'\n"
+            )
+            return execute_sandboxed_code(code, df, pd, np, px, go)
+
+    # 0.4 Loss-making / Negative Margin Orders
+    if any(k in q for k in ["loss", "losses", "negative margin", "unprofitable"]):
+        margin_col = find_best_column("margin", meaningful_num_cols) or find_best_column("profit", meaningful_num_cols)
+        if margin_col:
+            code = (
+                f"losses = df[df['{margin_col}'] < 0]\n"
+                f"if len(losses) > 0:\n"
+                f"    result = losses.head(10)\n"
+                f"    fig = px.histogram(losses, x='{margin_col}', title='Loss Distribution', template='plotly_white')\n"
+                f"    summary = f'Detected {{len(losses)}} unprofitable orders with negative {margin_col}.'\n"
+                f"else:\n"
+                f"    result = pd.DataFrame([{{'Status': 'Healthy', 'Unprofitable Orders': 0, 'Min Margin': df['{margin_col}'].min()}}])\n"
+                f"    fig = px.histogram(df, x='{margin_col}', title='Margin Distribution (All Positive)', template='plotly_white')\n"
+                f"    summary = 'Zero loss-making transactions found! All orders maintain healthy positive profit margins.'\n"
+            )
+            return execute_sandboxed_code(code, df, pd, np, px, go)
 
     # 1. Correlation Matrix
     if "correlation" in q or "heatmap" in q:
