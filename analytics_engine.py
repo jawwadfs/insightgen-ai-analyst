@@ -210,27 +210,51 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    # Prioritize meaningful numeric business metrics over ID/index columns
-    id_tokens = ["id", "order_id", "order id", "customer_id", "employee_id", "code", "zip"]
-    meaningful_num_cols = [c for c in num_cols if not any(t == c.lower().strip() or t in c.lower() for t in id_tokens)]
+    # Prioritize meaningful numeric business metrics over ID/index/code columns
+    def is_id_or_code_column(col_name: str) -> bool:
+        c = col_name.lower().strip()
+        # Direct matches
+        if c in ["id", "no", "num", "number", "code", "zip", "zip_code", "postal_code", "index", "key"]:
+            return True
+        # Ends with id / no / num / code
+        if any(c.endswith(sfx) for sfx in ["_id", " id", "_no", " no", "_num", " num", "_code", " code", "_zip"]):
+            return True
+        # Specific identifier names
+        if any(tok in c for tok in ["invoice_no", "order_id", "order_no", "customer_id", "cust_id", "product_id", "employee_id", "phone"]):
+            return True
+        return False
+
+    meaningful_num_cols = [c for c in num_cols if not is_id_or_code_column(c)]
     if not meaningful_num_cols:
         meaningful_num_cols = num_cols
 
-    # Prioritize categorical dimensions over IDs
-    meaningful_cat_cols = [c for c in cat_cols if not any(t == c.lower().strip() or t in c.lower() for t in id_tokens)]
+    meaningful_cat_cols = [c for c in cat_cols if not is_id_or_code_column(c)]
     if not meaningful_cat_cols:
         meaningful_cat_cols = cat_cols
 
+    # Common business synonyms across enterprise datasets
+    METRIC_SYNONYMS = {
+        "profit": ["profit", "margin", "net_profit", "earnings", "operating_profit", "net_margin", "net_income", "gain"],
+        "margin": ["margin", "profit", "net_margin", "profit_margin", "markup"],
+        "revenue": ["revenue", "sales", "turnover", "total_revenue", "gross_sales", "amount", "order_amount"],
+        "sales": ["sales", "revenue", "turnover", "gross_sales", "amount"],
+        "cost": ["cost", "unit_cost", "total_cost", "expense", "expenses", "cogs"],
+        "price": ["unit_price", "price", "rate", "selling_price"],
+        "quantity": ["quantity", "units_sold", "units", "qty", "volume", "count"],
+        "discount": ["discount", "rebate", "reduction"]
+    }
+
     generated_code = ""
 
-    # Improved matching helper
+    # Improved matching helper with synonyms and fuzzy plural handling
     def find_best_column(raw_term, candidate_cols):
         if not raw_term or not str(raw_term).strip():
             return None
         raw_clean = raw_term.lower().replace(" ", "").replace("_", "")
         if not raw_clean:
             return None
-        # exact or contains
+            
+        # 1. Exact or direct substring match
         for col in candidate_cols:
             c_clean = col.lower().replace(" ", "").replace("_", "")
             if c_clean == raw_clean or raw_clean == c_clean:
@@ -239,7 +263,16 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
             c_clean = col.lower().replace(" ", "").replace("_", "")
             if (c_clean in raw_clean or raw_clean in c_clean) and len(c_clean) > 3:
                 return col
-        # plural/singular normalization (e.g. subcategories -> subcategory)
+
+        # 2. Semantic business synonyms match
+        for metric_key, synonyms in METRIC_SYNONYMS.items():
+            if metric_key in raw_term.lower() or any(s in raw_term.lower() for s in synonyms):
+                for syn in synonyms:
+                    for col in candidate_cols:
+                        if syn in col.lower():
+                            return col
+
+        # 3. Plural / singular normalization (e.g. subcategories -> subcategory, countries -> country)
         if raw_clean.endswith("ies"):
             base = raw_clean[:-3] + "y"
             for col in candidate_cols:
@@ -254,9 +287,10 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
 
     # 1. Correlation Matrix
     if "correlation" in q or "heatmap" in q:
-        if len(num_cols) >= 2:
+        target_nums = meaningful_num_cols if len(meaningful_num_cols) >= 2 else num_cols
+        if len(target_nums) >= 2:
             code = (
-                "corr = df.select_dtypes(include=['number']).corr().round(2)\n"
+                f"corr = df[{target_nums}].corr().round(2)\n"
                 "result = corr\n"
                 "fig = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r', title='Correlation Heatmap')\n"
                 "summary = 'Calculated Pearson correlation coefficients across numerical attributes.'"
@@ -281,8 +315,8 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
         raw_dim = top_match.group(2).strip()
         raw_metric = top_match.group(3).strip() if len(top_match.groups()) >= 3 and top_match.group(3) else ""
 
-        matched_dim = find_best_column(raw_dim, cat_cols) or find_best_column(raw_dim, columns)
-        matched_metric = find_best_column(raw_metric, num_cols) or find_best_column(raw_metric, columns)
+        matched_dim = find_best_column(raw_dim, meaningful_cat_cols) or find_best_column(raw_dim, cat_cols) or find_best_column(raw_dim, columns)
+        matched_metric = find_best_column(raw_metric, meaningful_num_cols) or find_best_column(raw_metric, num_cols) or find_best_column(raw_metric, columns)
 
         if not matched_dim and meaningful_cat_cols:
             matched_dim = meaningful_cat_cols[0]
@@ -290,7 +324,8 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
             matched_dim = cat_cols[0]
             
         if not matched_metric and meaningful_num_cols:
-            matched_metric = meaningful_num_cols[-1]
+            # Default to profit/margin or revenue/sales if present, otherwise last meaningful metric
+            matched_metric = find_best_column("profit", meaningful_num_cols) or find_best_column("revenue", meaningful_num_cols) or meaningful_num_cols[-1]
         elif not matched_metric and num_cols:
             matched_metric = num_cols[0]
 
@@ -312,19 +347,19 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
         term1 = by_match.group(1).strip()
         term2 = by_match.group(2).strip()
 
-        metric_col = find_best_column(term1, num_cols) or find_best_column(term1, columns)
-        dim_col = find_best_column(term2, cat_cols) or find_best_column(term2, columns)
+        metric_col = find_best_column(term1, meaningful_num_cols) or find_best_column(term1, num_cols) or find_best_column(term1, columns)
+        dim_col = find_best_column(term2, meaningful_cat_cols) or find_best_column(term2, cat_cols) or find_best_column(term2, columns)
 
         # Swap if dim was found in term1 and metric in term2
         if not metric_col and not dim_col:
-            dim_col = find_best_column(term1, cat_cols)
-            metric_col = find_best_column(term2, num_cols)
+            dim_col = find_best_column(term1, meaningful_cat_cols) or find_best_column(term1, cat_cols)
+            metric_col = find_best_column(term2, meaningful_num_cols) or find_best_column(term2, num_cols)
         elif metric_col in cat_cols and dim_col in num_cols:
             metric_col, dim_col = dim_col, metric_col
-        elif not metric_col and num_cols:
-            metric_col = num_cols[0]
-        elif not dim_col and cat_cols:
-            dim_col = [c for c in cat_cols if "id" not in c.lower()][0]
+        elif not metric_col and meaningful_num_cols:
+            metric_col = find_best_column("revenue", meaningful_num_cols) or meaningful_num_cols[0]
+        elif not dim_col and meaningful_cat_cols:
+            dim_col = meaningful_cat_cols[0]
 
         if dim_col:
             if metric_col in num_cols:
@@ -347,11 +382,20 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
 
     # 4. Distribution / Histogram
     if "distribution" in q or "histogram" in q or "spread" in q:
-        target_num = meaningful_num_cols[0] if meaningful_num_cols else (num_cols[0] if num_cols else columns[0])
-        for col in meaningful_num_cols + num_cols:
-            if col.lower() in q:
-                target_num = col
-                break
+        target_num = None
+        for syn_key, syn_list in METRIC_SYNONYMS.items():
+            if syn_key in q or any(s in q for s in syn_list):
+                target_num = find_best_column(syn_key, meaningful_num_cols) or find_best_column(syn_key, num_cols)
+                if target_num:
+                    break
+        if not target_num:
+            for col in meaningful_num_cols + num_cols:
+                if col.lower() in q:
+                    target_num = col
+                    break
+        if not target_num:
+            target_num = meaningful_num_cols[0] if meaningful_num_cols else (num_cols[0] if num_cols else columns[0])
+
         code = (
             f"result = df['{target_num}'].describe().to_frame().T\n"
             f"fig = px.histogram(df, x='{target_num}', nbins=30, marginal='box', "
@@ -362,25 +406,30 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
 
     # 5. Outliers / Boxplot
     if "outlier" in q or "anomaly" in q or "box" in q:
-        # Check if user mentioned profit, revenue, sales, etc.
-        target_num = meaningful_num_cols[-1] if meaningful_num_cols else (num_cols[0] if num_cols else columns[0])
-        for col in meaningful_num_cols + num_cols:
-            if col.lower() in q:
-                target_num = col
-                break
-            # check common keywords
-            if "profit" in q and "profit" in col.lower():
-                target_num = col
-                break
-            if ("revenue" in q or "sales" in q) and ("revenue" in col.lower() or "sales" in col.lower()):
-                target_num = col
-                break
-            if "cost" in q and "cost" in col.lower():
-                target_num = col
-                break
-            if "unit" in q and "unit" in col.lower():
-                target_num = col
-                break
+        target_num = None
+        # First check synonyms for business metrics (e.g. 'profit' -> matches 'margin')
+        for syn_key, syn_list in METRIC_SYNONYMS.items():
+            if syn_key in q or any(s in q for s in syn_list):
+                target_num = find_best_column(syn_key, meaningful_num_cols) or find_best_column(syn_key, num_cols)
+                if target_num:
+                    break
+
+        # Next check direct column names mentioned in query
+        if not target_num:
+            for col in meaningful_num_cols + num_cols:
+                if col.lower() in q:
+                    target_num = col
+                    break
+
+        # Fallback to key metrics (profit, margin, revenue, sales, or last meaningful column)
+        if not target_num:
+            target_num = (
+                find_best_column("profit", meaningful_num_cols) or 
+                find_best_column("margin", meaningful_num_cols) or 
+                find_best_column("revenue", meaningful_num_cols) or 
+                (meaningful_num_cols[-1] if meaningful_num_cols else (num_cols[0] if num_cols else columns[0]))
+            )
+
         code = (
             f"q1 = df['{target_num}'].quantile(0.25)\n"
             f"q3 = df['{target_num}'].quantile(0.75)\n"
@@ -399,10 +448,11 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
         return execute_sandboxed_code(code, df, pd, np, px, go)
 
     # 6. Default Fallback: Five-number summary + Key metrics
+    default_num = meaningful_num_cols[0] if meaningful_num_cols else (num_cols[0] if num_cols else df.columns[0])
     code = (
         "summary_stats = df.describe(include='all').T.fillna('-')\n"
         "result = summary_stats[['count', 'mean', 'std', 'min', '50%', 'max']].head(8) if 'mean' in summary_stats.columns else summary_stats.head(8)\n"
-        f"num_col = '{num_cols[0]}' if len({num_cols}) > 0 else df.columns[0]\n"
+        f"num_col = '{default_num}'\n"
         "fig = px.histogram(df, x=num_col, title=f'Distribution of {num_col}', template='plotly_white')\n"
         "summary = f'Overview generated: dataset contains {len(df)} records across {len(df.columns)} columns.'"
     )
