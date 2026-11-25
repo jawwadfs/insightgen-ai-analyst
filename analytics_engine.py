@@ -292,6 +292,29 @@ def fallback_offline_query(user_query: str, df: pd.DataFrame) -> Dict[str, Any]:
                     return col
         return None
 
+    # 0.0 Data Quality / Missing Value Rate / Duplicate Rows
+    if any(k in q for k in ["missing", "null", "duplicate", "data quality", "data health", "cleanliness", "empty"]):
+        code = (
+            "total_cells = df.shape[0] * df.shape[1]\n"
+            "total_nulls = int(df.isnull().sum().sum())\n"
+            "null_pct = round((total_nulls / total_cells) * 100, 2) if total_cells > 0 else 0\n"
+            "dup_rows = int(df.duplicated().sum())\n"
+            "null_per_col = df.isnull().sum().reset_index()\n"
+            "null_per_col.columns = ['Column', 'Missing_Values']\n"
+            "null_per_col['Missing_%'] = (null_per_col['Missing_Values'] / len(df) * 100).round(2)\n"
+            "result = pd.DataFrame([{\n"
+            "    'Total Records': len(df),\n"
+            "    'Total Columns': len(df.columns),\n"
+            "    'Missing Value Rate': f'{null_pct}%',\n"
+            "    'Total Missing Cells': total_nulls,\n"
+            "    'Duplicate Rows': dup_rows,\n"
+            "    'Data Cleanliness Score': f'{100 - null_pct:.1f}%'\n"
+            "}])\n"
+            "fig = px.bar(null_per_col, x='Column', y='Missing_Values', title='Missing Values by Column (0 = Perfect Quality)', template='plotly_white')\n"
+            "summary = f'Data Quality Audit: Missing value rate is {null_pct}% ({total_nulls} nulls) across {len(df):,} records with {dup_rows} duplicate rows.'\n"
+        )
+        return execute_sandboxed_code(code, df, pd, np, px, go)
+
     # 0. Overall Financial KPIs / Summary
     if any(k in q for k in ["total revenue", "total profit", "total sales", "total margin", "overall kpi", "kpi", "financial performance", "overview of sales"]):
         rev_col = find_best_column("revenue", meaningful_num_cols) or find_best_column("sales", meaningful_num_cols)

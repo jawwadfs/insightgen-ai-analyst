@@ -220,6 +220,21 @@ if df is None:
     st.warning("Please select or upload a dataset in the sidebar to begin.")
     st.stop()
 
+# Quick Executive Data Health Bar
+quick_eda = automated_executive_summary(df)
+st.markdown(
+    f"""
+    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 16px; margin: 12px 0 18px 0; display: flex; flex-wrap: wrap; gap: 24px; font-size: 14px; align-items: center;">
+        <span>📊 <b>Records:</b> {quick_eda['rows']:,}</span>
+        <span>🏷️ <b>Features:</b> {quick_eda['columns']}</span>
+        <span>🔍 <b>Missing Value Rate:</b> <span style="color: {'#16a34a' if quick_eda['null_pct'] == 0 else '#dc2626'}; font-weight: 600;">{quick_eda['null_pct']}%</span></span>
+        <span>📑 <b>Duplicate Rows:</b> <span style="color: {'#16a34a' if quick_eda['duplicate_rows'] == 0 else '#dc2626'}; font-weight: 600;">{quick_eda['duplicate_rows']}</span></span>
+        <span>🛡️ <b>Cleanliness Score:</b> <span style="color: #16a34a; font-weight: 600;">{100 - quick_eda['null_pct']:.1f}%</span></span>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 
 # Tabs
 tab_chat, tab_eda, tab_security = st.tabs([
